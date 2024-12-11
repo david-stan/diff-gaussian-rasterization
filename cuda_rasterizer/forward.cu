@@ -285,7 +285,8 @@ renderCUDA(
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color,
 	const float* __restrict__ depths,
-	float* __restrict__ invdepth)
+	float* __restrict__ invdepth,
+	int* __restrict__ pixel_to_gaussians)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -318,6 +319,19 @@ renderCUDA(
 	float C[CHANNELS] = { 0 };
 
 	float expected_invdepth = 0.0f;
+
+	// Initialize per-pixel variables
+    const int K = 5; // Maximum number of Gaussians per pixel
+    int gaussian_indices[K];
+    float gaussian_alphas[K];
+    int gaussian_count = 0;
+
+    // Initialize arrays
+    #pragma unroll
+    for (int i = 0; i < K; i++) {
+        gaussian_indices[i] = -1;
+        gaussian_alphas[i] = 0.0f;
+    }
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -367,6 +381,30 @@ renderCUDA(
 				continue;
 			}
 
+			// Record the Gaussian if it's among the top K
+            if (gaussian_count < K) {
+                // Less than K Gaussians recorded so far, insert directly
+                gaussian_indices[gaussian_count] = collected_id[j];
+                gaussian_alphas[gaussian_count] = alpha;
+                gaussian_count++;
+            } else {
+                // Find the minimum alpha in the current top K
+                int min_idx = 0;
+                float min_alpha = gaussian_alphas[0];
+                for (int k = 1; k < K; k++) {
+                    if (gaussian_alphas[k] < min_alpha) {
+                        min_alpha = gaussian_alphas[k];
+                        min_idx = k;
+                    }
+                }
+
+                // If the new alpha is greater than the minimum, replace it
+                if (alpha > min_alpha) {
+                    gaussian_indices[min_idx] = collected_id[j];
+                    gaussian_alphas[min_idx] = alpha;
+                }
+            }
+
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
@@ -386,6 +424,28 @@ renderCUDA(
 	// rendering data to the frame and auxiliary buffers.
 	if (inside)
 	{
+		// Optionally sort the Gaussians by alpha
+        for (int i = 0; i < K - 1; i++) {
+            for (int j = 0; j < K - i - 1; j++) {
+                if (gaussian_alphas[j] < gaussian_alphas[j + 1]) {
+                    // Swap alphas
+                    float temp_alpha = gaussian_alphas[j];
+                    gaussian_alphas[j] = gaussian_alphas[j + 1];
+                    gaussian_alphas[j + 1] = temp_alpha;
+                    // Swap indices
+                    int temp_idx = gaussian_indices[j];
+                    gaussian_indices[j] = gaussian_indices[j + 1];
+                    gaussian_indices[j + 1] = temp_idx;
+                }
+            }
+        }
+
+        // Store the top K indices into the buffer
+        for (int k = 0; k < K; k++) {
+            int offset = pix_id * K + k;
+            pixel_to_gaussians[offset] = gaussian_indices[k];
+        }
+
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
@@ -409,7 +469,8 @@ void FORWARD::render(
 	const float* bg_color,
 	float* out_color,
 	float* depths,
-	float* depth)
+	float* depth,
+	int* pixel_to_gaussians)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
@@ -423,7 +484,8 @@ void FORWARD::render(
 		bg_color,
 		out_color,
 		depths, 
-		depth);
+		depth,
+		pixel_to_gaussians);
 }
 
 void FORWARD::preprocess(int P, int D, int M,

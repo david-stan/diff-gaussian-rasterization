@@ -32,7 +32,7 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     return lambda;
 }
 
-std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
 	const torch::Tensor& means3D,
@@ -84,6 +84,10 @@ RasterizeGaussiansCUDA(
   std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
   std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
   
+  // At the beginning of RasterizeGaussiansCUDA, after existing allocations
+  const int K = 5; // Maximum number of Gaussians per pixel
+  torch::Tensor pixel_to_gaussians = torch::full({H * W * K}, -1, int_opts);
+  
   int rendered = 0;
   if(P != 0)
   {
@@ -117,10 +121,11 @@ RasterizeGaussiansCUDA(
 		out_color.contiguous().data<float>(),
 		out_invdepthptr,
 		antialiasing,
+		pixel_to_gaussians.contiguous().data_ptr<int>(),
 		radii.contiguous().data<int>(),
 		debug);
   }
-  return std::make_tuple(rendered, out_color, radii, geomBuffer, binningBuffer, imgBuffer, out_invdepth);
+  return std::make_tuple(rendered, out_color, radii, geomBuffer, binningBuffer, imgBuffer, out_invdepth, pixel_to_gaussians);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
